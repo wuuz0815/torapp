@@ -51,8 +51,8 @@ interface Zugang {
 /** Digest-Anmeldung der Shelly-RPC-Schnittstelle (SHA-256), identisch zur Web-App. */
 object ShellyDigest {
     const val BENUTZER = "admin"
-    private val NONCE = Regex("\"nonce\"\\s*:\\s*(\\d+)")
-    private val NC = Regex("\"nc\"\\s*:\\s*(\\d+)")
+    private val NONCE = Regex("\"nonce\"\\s*:\\s*\"?(\\d+)")
+    private val NC = Regex("\"nc\"\\s*:\\s*\"?(\\d+)")
     private val REALM = Regex("\"realm\"\\s*:\\s*\"([^\"]+)\"")
     private val zufall = SecureRandom()
 
@@ -64,9 +64,15 @@ object ShellyDigest {
 
     fun ha1(realm: String, passwort: String): String = sha256("$BENUTZER:$realm:$passwort")
 
-    /** Liest die Herausforderung aus der 401-Fehlermeldung (JSON als maskierter Text). */
-    fun herausforderung(fehlerText: String?): Herausforderung? {
-        val text = (fehlerText ?: return null).replace("\\\"", "\"")
+    /**
+     * Liest die Herausforderung aus der 401-Antwort. Tolerant gegenüber Varianten:
+     * message als maskierter Text oder als Objekt, Zahlen mit oder ohne Anführungszeichen.
+     */
+    fun herausforderung(antwort: String?): Herausforderung? {
+        val text = (antwort ?: return null)
+            .replace("\\u0022", "\"")
+            .replace("\\\\\\\"", "\"")
+            .replace("\\\"", "\"")
         val realm = REALM.find(text)?.groupValues?.get(1) ?: return null
         val nonce = NONCE.find(text)?.groupValues?.get(1) ?: return null
         val nc = NC.find(text)?.groupValues?.get(1) ?: "1"
@@ -207,8 +213,11 @@ class TorSteuerung(
     private fun mitAnmeldung(rpc: ShellyRpc, methode: String, params: String): RpcAntwort {
         val erste = rpc.aufrufen(methode, params)
         if (erste.fehlerCode != 401) return erste
-        val h = ShellyDigest.herausforderung(erste.fehlerText)
-            ?: return erste.copy(fehlerText = "Anmeldeanfrage des Shelly nicht lesbar")
+        log.debug("401-Antwort: ${erste.roh.take(400)}")
+        val h = ShellyDigest.herausforderung(erste.roh) ?: run {
+            log.warnung("Anmeldeanfrage nicht lesbar, Rohantwort: ${erste.roh.take(400)}")
+            return erste.copy(fehlerText = "Anmeldeanfrage des Shelly nicht lesbar")
+        }
         log.debug("Shelly verlangt Anmeldung (Realm ${h.realm})")
         val ha1 = zugang?.ha1(h.realm) ?: return erste.copy(fehlerText = PASSWORT_FEHLT)
         val zweite = rpc.aufrufen(methode, params, ShellyDigest.authJson(h, ha1))
