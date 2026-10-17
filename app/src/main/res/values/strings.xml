@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Datei: strings.xml – Tor-App, Autor: Stefan Weinzetl -->
+<resources>
+    <string name="app_name">Tor</string>
+    <string name="widget_beschriftung">Tor</string>
+    <string name="widget_beschreibung">Ein Tipp öffnet das Tor</string>
+</resources>

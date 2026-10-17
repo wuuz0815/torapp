@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Datei: colors.xml (Dunkelmodus) – Tor-App, Autor: Stefan Weinzetl -->
+<resources>
+    <color name="tor_gruen">#FF3F7A5F</color>
+    <color name="hintergrund">#FF121614</color>
+    <color name="status_ok">#FF4CB36D</color>
+    <color name="status_fehler">#FFF2827A</color>
+</resources>

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Datei: ic_launcher_vordergrund.xml – Torsymbol, Autor: Stefan Weinzetl -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M30,36h4v38h-4z M74,36h4v38h-4z M30,42h48v3h-48z M30,66h48v3h-48z M41,45h3v21h-3z M49.5,45h3v21h-3z M58,45h3v21h-3z M66,45h3v21h-3z" />
+</vector>

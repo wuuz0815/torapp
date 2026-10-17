@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Datei: themes.xml – Tor-App, Autor: Stefan Weinzetl -->
+<resources>
+    <style name="Thema.Tor" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/hintergrund</item>
+        <item name="android:statusBarColor">@color/tor_gruen</item>
+        <item name="android:colorAccent">@color/tor_gruen</item>
+    </style>
+</resources>

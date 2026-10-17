@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Datei: widget_hintergrund.xml – Tor-App, Autor: Stefan Weinzetl -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <solid android:color="@color/tor_gruen" />
+    <corners android:radius="24dp" />
+</shape>
