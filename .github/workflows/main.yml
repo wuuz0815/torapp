@@ -1,8 +1,8 @@
 # =============================================================================
 # Datei:  .github/workflows/main.yml – baut die Tor-App (APK)
 # Autor:  
-# Ablauf: Jeder Push auf main baut eine APK (Download unter Actions → Artifacts).
-#         Ein Tag v* (z. B. v1.0.1) erzeugt zusätzlich ein Release mit APK.
+# Ablauf: Jeder Push auf main baut eine APK und veröffentlicht sie als Release
+#         v<APP_VERSION> (Tag wird automatisch angelegt bzw. das Release aktualisiert).
 # Signatur: Sind die Secrets KEYSTORE_BASE64, KEYSTORE_PASSWORT, KEY_ALIAS und
 #         KEY_PASSWORT hinterlegt, wird mit dem eigenen Schlüssel signiert,
 #         sonst mit einem wechselnden Testschlüssel.
@@ -63,6 +63,7 @@ jobs:
             exit 1
           fi
           cp app/build/outputs/apk/release/app-release.apk "TorApp-$VERSION.apk"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           echo "APK: TorApp-$VERSION.apk"
 
       - name: APK als Artefakt ablegen
@@ -71,8 +72,12 @@ jobs:
           name: TorApp
           path: TorApp-*.apk
 
-      - name: Release erstellen
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Release erstellen bzw. aktualisieren
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.VERSION }}
+          name: Tor-App ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
           files: TorApp-*.apk
