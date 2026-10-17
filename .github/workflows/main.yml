@@ -1,0 +1,78 @@
+# =============================================================================
+# Datei:  .github/workflows/main.yml – baut die Tor-App (APK)
+# Autor:  
+# Ablauf: Jeder Push auf main baut eine APK (Download unter Actions → Artifacts).
+#         Ein Tag v* (z. B. v1.0.1) erzeugt zusätzlich ein Release mit APK.
+# Signatur: Sind die Secrets KEYSTORE_BASE64, KEYSTORE_PASSWORT, KEY_ALIAS und
+#         KEY_PASSWORT hinterlegt, wird mit dem eigenen Schlüssel signiert,
+#         sonst mit einem wechselnden Testschlüssel.
+# =============================================================================
+name: APK bauen
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  bauen:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Quellcode holen
+        uses: actions/checkout@v4
+
+      - name: Java 17 einrichten
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Gradle einrichten
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+
+      - name: Signaturschlüssel bereitstellen (optional)
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/torapp.jks"
+            echo "TORAPP_KEYSTORE=$RUNNER_TEMP/torapp.jks" >> "$GITHUB_ENV"
+            echo "Eigener Signaturschlüssel aktiv"
+          else
+            echo "::warning::Kein Signaturschlüssel hinterlegt – Testsignatur, Updates erfordern Neuinstallation"
+          fi
+
+      - name: APK bauen
+        env:
+          TORAPP_KEYSTORE_PASSWORT: ${{ secrets.KEYSTORE_PASSWORT }}
+          TORAPP_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          TORAPP_KEY_PASSWORT: ${{ secrets.KEY_PASSWORT }}
+        run: gradle --no-daemon assembleRelease
+
+      - name: APK benennen
+        run: |
+          VERSION=$(grep -oP 'val APP_VERSION = "\K[^"]+' app/build.gradle.kts)
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$VERSION" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} passt nicht zu APP_VERSION $VERSION"
+            exit 1
+          fi
+          cp app/build/outputs/apk/release/app-release.apk "TorApp-$VERSION.apk"
+          echo "APK: TorApp-$VERSION.apk"
+
+      - name: APK als Artefakt ablegen
+        uses: actions/upload-artifact@v4
+        with:
+          name: TorApp
+          path: TorApp-*.apk
+
+      - name: Release erstellen
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: TorApp-*.apk
