@@ -29,6 +29,9 @@ class AusloeserActivity : Activity() {
             runOnUiThread {
                 Toast.makeText(app, meldung, Toast.LENGTH_LONG).show()
                 if (ok) Gemeinsam.vibrieren(app)
+                if (meldung == TorSteuerung.PASSWORT_FEHLT || meldung == TorSteuerung.PASSWORT_FALSCH) {
+                    startActivity(Intent(app, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
                 finish()
             }
         }, "widget-tor-oeffnen").apply { isDaemon = true }.start()

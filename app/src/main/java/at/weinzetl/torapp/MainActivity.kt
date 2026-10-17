@@ -33,7 +33,9 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.widget.Button
+import android.text.InputType
 import android.widget.CheckBox
+import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
@@ -131,6 +133,10 @@ class MainActivity : Activity() {
 
         spalte.addView(knopf("Gerät wählen") { mitBerechtigung(fuerSuche = false) { geraetWaehlen() } })
         spalte.addView(knopf("Verbindung prüfen (ohne Schalten)") { verbindungPruefenKlick() })
+        spalte.addView(knopf("Gespeichertes Passwort löschen") {
+            Zugangsspeicher(this, log).verwerfen()
+            status("Passwort gelöscht. Es wird beim nächsten Öffnen erneut abgefragt.", null)
+        })
 
         spalte.addView(CheckBox(this).apply {
             text = "Diagnosemodus (ausführliches Protokoll)"
@@ -215,6 +221,7 @@ class MainActivity : Activity() {
                     status(meldung, ok)
                     btnTor.isEnabled = true
                     if (ok) Gemeinsam.vibrieren(this)
+                    if (!ok && passwortNoetig(meldung)) passwortAbfragen(meldung) { torOeffnenKlick() }
                 }
             }
         }
@@ -230,7 +237,10 @@ class MainActivity : Activity() {
             status("Prüfe Verbindung …", null)
             hintergrund("verbindung-pruefen") {
                 val (ok, meldung) = steuerung.verbindungPruefen { m -> ui.post { status(m, null) } }
-                ui.post { status(meldung, ok) }
+                ui.post {
+                    status(meldung, ok)
+                    if (!ok && passwortNoetig(meldung)) passwortAbfragen(meldung) { verbindungPruefenKlick() }
+                }
             }
         }
     }
@@ -432,6 +442,41 @@ class MainActivity : Activity() {
             }
         }
         kopplungsEmpfaenger = null
+    }
+
+    // -------------------------------------------------------------------------
+    // Passwortabfrage
+    // -------------------------------------------------------------------------
+    private fun passwortNoetig(meldung: String) =
+        meldung == TorSteuerung.PASSWORT_FEHLT || meldung == TorSteuerung.PASSWORT_FALSCH
+
+    private fun passwortAbfragen(hinweis: String, danach: () -> Unit) {
+        if (isFinishing) return
+        val feld = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = "Gerätepasswort"
+        }
+        val rahmen = LinearLayout(this).apply {
+            setPadding(dp(24), dp(8), dp(24), 0)
+            addView(feld, breit())
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Shelly-Passwort")
+            .setMessage("$hinweis\nGespeichert wird nur ein verschlüsselter Hash, nicht das Passwort.")
+            .setView(rahmen)
+            .setPositiveButton("Übernehmen") { _, _ ->
+                val wert = feld.text.toString()
+                feld.setText("")
+                if (wert.isEmpty()) {
+                    status("Kein Passwort eingegeben.", false)
+                    return@setPositiveButton
+                }
+                Zugangsspeicher.einrichtungsPasswort = wert
+                log.info("Passwort übernommen (nur Arbeitsspeicher bis zur Anmeldung)")
+                danach()
+            }
+            .setNegativeButton("Abbrechen", null)
+            .show()
     }
 
     // -------------------------------------------------------------------------

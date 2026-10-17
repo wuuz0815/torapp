@@ -10,6 +10,8 @@ package at.weinzetl.torapp
 
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
+import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Die drei GATT-Kennungen des Shelly-RPC-Dienstes. */
@@ -40,6 +42,44 @@ object Konfig {
 
 data class RpcAntwort(val roh: String, val fehlerCode: Int?, val fehlerText: String?)
 
+/** Liefert den Anmelde-Hash (HA1) zum Realm des Shelly oder null, wenn kein Passwort hinterlegt ist. */
+interface Zugang {
+    fun ha1(realm: String): String?
+    fun verwerfen()
+}
+
+/** Digest-Anmeldung der Shelly-RPC-Schnittstelle (SHA-256), identisch zur Web-App. */
+object ShellyDigest {
+    const val BENUTZER = "admin"
+    private val NONCE = Regex("\"nonce\"\\s*:\\s*(\\d+)")
+    private val NC = Regex("\"nc\"\\s*:\\s*(\\d+)")
+    private val REALM = Regex("\"realm\"\\s*:\\s*\"([^\"]+)\"")
+    private val zufall = SecureRandom()
+
+    data class Herausforderung(val realm: String, val nonce: String, val nc: String)
+
+    fun sha256(text: String): String =
+        MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+
+    fun ha1(realm: String, passwort: String): String = sha256("$BENUTZER:$realm:$passwort")
+
+    /** Liest die Herausforderung aus der 401-Fehlermeldung (JSON als maskierter Text). */
+    fun herausforderung(fehlerText: String?): Herausforderung? {
+        val text = (fehlerText ?: return null).replace("\\\"", "\"")
+        val realm = REALM.find(text)?.groupValues?.get(1) ?: return null
+        val nonce = NONCE.find(text)?.groupValues?.get(1) ?: return null
+        val nc = NC.find(text)?.groupValues?.get(1) ?: "1"
+        return Herausforderung(realm, nonce, nc)
+    }
+
+    fun authJson(h: Herausforderung, ha1: String, cnonce: Long = (zufall.nextInt() and 0x7fffffff).toLong()): String {
+        val ha2 = sha256("dummy_method:dummy_uri")
+        val antwort = sha256("$ha1:${h.nonce}:${h.nc}:$cnonce:auth:$ha2")
+        return """{"realm":"${h.realm}","username":"$BENUTZER","nonce":${h.nonce},"cnonce":$cnonce,"response":"$antwort","algorithm":"SHA-256"}"""
+    }
+}
+
 class ShellyRpc(
     private val kanal: GattKanal,
     private val log: Protokoll,
@@ -50,8 +90,9 @@ class ShellyRpc(
         private set
     private var naechsteId = 1
 
-    fun aufrufen(methode: String, paramsJson: String): RpcAntwort {
-        val anfrage = """{"id":${naechsteId++},"src":"${Konfig.QUELLE}","method":"$methode","params":$paramsJson}"""
+    fun aufrufen(methode: String, paramsJson: String, authJson: String? = null): RpcAntwort {
+        val auth = if (authJson != null) ""","auth":$authJson""" else ""
+        val anfrage = """{"id":${naechsteId++},"src":"${Konfig.QUELLE}","method":"$methode","params":$paramsJson$auth}"""
         senden(anfrage.toByteArray(Charsets.UTF_8))
         return auswerten(empfangen())
     }
@@ -104,6 +145,7 @@ class ShellyRpc(
 class TorSteuerung(
     private val log: Protokoll,
     private val kanalFabrik: () -> GattKanal,
+    private val zugang: Zugang? = null,
     private val warten: (Long) -> Unit = { Thread.sleep(it) },
 ) {
     private sealed class Lauf {
@@ -120,7 +162,7 @@ class TorSteuerung(
         log.info("=== Aktion gestartet: Tor öffnen ===")
         try {
             val params = """{"id":${Konfig.SCHALTER_ID},"on":true,"toggle_after":${Konfig.IMPULS_SEKUNDEN}}"""
-            return when (val lauf = mitWiederholung(statusMelden, sicherWiederholbar = false) { it.aufrufen("Switch.Set", params) }) {
+            return when (val lauf = mitWiederholung(statusMelden, sicherWiederholbar = false) { mitAnmeldung(it, "Switch.Set", params) }) {
                 is Lauf.Fehler -> Pair(false, lauf.meldung)
                 is Lauf.Ok -> fehlerPruefen(lauf.antwort) ?: run {
                     log.info("Impuls erfolgreich gesendet")
@@ -142,7 +184,7 @@ class TorSteuerung(
         log.info("=== Aktion gestartet: Verbindung prüfen ===")
         try {
             val params = """{"id":${Konfig.SCHALTER_ID}}"""
-            return when (val lauf = mitWiederholung(statusMelden, sicherWiederholbar = true) { it.aufrufen("Switch.GetStatus", params) }) {
+            return when (val lauf = mitWiederholung(statusMelden, sicherWiederholbar = true) { mitAnmeldung(it, "Switch.GetStatus", params) }) {
                 is Lauf.Fehler -> Pair(false, lauf.meldung)
                 is Lauf.Ok -> fehlerPruefen(lauf.antwort) ?: run {
                     val zustand = AUSGANG.find(lauf.antwort.roh)?.groupValues?.get(1)
@@ -161,11 +203,40 @@ class TorSteuerung(
         }
     }
 
+    /** Ruft auf und meldet sich bei Bedarf in derselben Verbindung per Digest an. */
+    private fun mitAnmeldung(rpc: ShellyRpc, methode: String, params: String): RpcAntwort {
+        val erste = rpc.aufrufen(methode, params)
+        if (erste.fehlerCode != 401) return erste
+        val h = ShellyDigest.herausforderung(erste.fehlerText)
+            ?: return erste.copy(fehlerText = "Anmeldeanfrage des Shelly nicht lesbar")
+        log.debug("Shelly verlangt Anmeldung (Realm ${h.realm})")
+        val ha1 = zugang?.ha1(h.realm) ?: return erste.copy(fehlerText = PASSWORT_FEHLT)
+        val zweite = rpc.aufrufen(methode, params, ShellyDigest.authJson(h, ha1))
+        if (zweite.fehlerCode == 401) {
+            zugang?.verwerfen()
+            return zweite.copy(fehlerText = PASSWORT_FALSCH)
+        }
+        log.debug("Anmeldung erfolgreich")
+        return zweite
+    }
+
     private fun fehlerPruefen(antwort: RpcAntwort): Pair<Boolean, String>? {
         val code = antwort.fehlerCode ?: return null
         if (code == 401) {
-            log.fehler("Shelly verlangt eine Anmeldung über Bluetooth")
-            return Pair(false, "Shelly verlangt ein Passwort über Bluetooth. Wird von dieser Version nicht unterstützt.")
+            return when (antwort.fehlerText) {
+                PASSWORT_FEHLT -> {
+                    log.warnung("Shelly verlangt Anmeldung, kein Passwort hinterlegt")
+                    Pair(false, PASSWORT_FEHLT)
+                }
+                PASSWORT_FALSCH -> {
+                    log.fehler("Anmeldung abgelehnt, gespeicherte Zugangsdaten verworfen")
+                    Pair(false, PASSWORT_FALSCH)
+                }
+                else -> {
+                    log.fehler("Anmeldung fehlgeschlagen: ${antwort.fehlerText}")
+                    Pair(false, "Anmeldung fehlgeschlagen: ${antwort.fehlerText}")
+                }
+            }
         }
         log.fehler("Shelly meldet Fehler $code: ${antwort.fehlerText}")
         return Pair(false, "Shelly meldet Fehler $code: ${antwort.fehlerText ?: "unbekannt"}")
@@ -212,6 +283,10 @@ class TorSteuerung(
     }
 
     companion object {
+        /** Kennungen für die Oberfläche: Passwortabfrage anzeigen. */
+        const val PASSWORT_FEHLT = "Bitte einmalig das Gerätepasswort des Shelly eingeben."
+        const val PASSWORT_FALSCH = "Passwort falsch. Bitte neu eingeben."
+
         /** Verhindert parallele Vorgänge (App und Widget gleichzeitig). */
         private val laeuft = AtomicBoolean(false)
         private val AUSGANG = Regex("\"output\"\\s*:\\s*(true|false)")
