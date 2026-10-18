@@ -21,6 +21,8 @@ class GattFehler(nachricht: String, val status: Int = -1) : Exception(nachricht)
 
 /** Abstraktion der Bluetooth-Verbindung (Android: BleGattKanal, Tests: Simulation). */
 interface GattKanal {
+    /** Größte Blockgröße je Schreibvorgang (abhängig von der ausgehandelten MTU). */
+    val maxBlock: Int get() = Konfig.BLOCK_GROESSE
     fun verbinden()
     fun schreiben(kanal: Kanal, daten: ByteArray)
     fun lesen(kanal: Kanal): ByteArray
@@ -30,7 +32,10 @@ interface GattKanal {
 object Konfig {
     const val SCHALTER_ID = 0                    // Relais-Kanal des Shelly 1 Gen3
     const val IMPULS_SEKUNDEN = 1                // Relais fällt danach selbst ab
-    const val BLOCK_GROESSE = 20                 // Byte je Schreibvorgang (Shelly-Empfehlung)
+    const val BLOCK_GROESSE = 20                 // Mindest-Blockgröße (Standard-MTU 23)
+    const val MTU_WUNSCH = 247                   // größere Pakete = weniger Schreibvorgänge
+    const val TX_WIEDERHOLUNGEN = 4              // Längenangabe in derselben Verbindung erneut senden
+    const val TX_PAUSE_MS = 150L                 // Wartezeit, bis die Verschlüsselung steht
     const val PAUSE_NACH_LAENGE_MS = 50L         // Pause zwischen Längenangabe und Daten
     const val PAUSE_NACH_VERBINDUNG_MS = 300L    // Android braucht Zeit vor der Dienstsuche
     const val ZEITLIMIT_MS = 8000L               // Zeitlimit je Bluetooth-Schritt
@@ -99,7 +104,11 @@ class ShellyRpc(
     private val log: Protokoll,
     private val warten: (Long) -> Unit = { Thread.sleep(it) },
 ) {
-    /** Ab true kann der Shelly den Befehl ausführen: keine automatische Wiederholung mehr. */
+    /**
+     * Ab true kann der Shelly den Befehl ausführen: keine automatische Wiederholung mehr.
+     * Wird erst vor dem letzten Datenblock gesetzt, da der Shelly erst nach dem
+     * vollständigen Rahmen ausführt.
+     */
     var datenBegonnen = false
         private set
     private var naechsteId = 1
@@ -114,14 +123,17 @@ class ShellyRpc(
     private fun senden(bytes: ByteArray) {
         kanal.schreiben(Kanal.TX, ByteBuffer.allocate(4).putInt(bytes.size).array()) // Big Endian
         warten(Konfig.PAUSE_NACH_LAENGE_MS)
-        datenBegonnen = true
+        val block = maxOf(Konfig.BLOCK_GROESSE, kanal.maxBlock)
         var pos = 0
+        var bloecke = 0
         while (pos < bytes.size) {
-            val ende = minOf(pos + Konfig.BLOCK_GROESSE, bytes.size)
+            val ende = minOf(pos + block, bytes.size)
+            if (ende == bytes.size) datenBegonnen = true
             kanal.schreiben(Kanal.DATEN, bytes.copyOfRange(pos, ende))
             pos = ende
+            bloecke++
         }
-        log.debug("Rahmen gesendet (${bytes.size} Byte)")
+        log.debug("Rahmen gesendet (${bytes.size} Byte in $bloecke Block/Blöcken à max. $block)")
     }
 
     private fun empfangen(): String {

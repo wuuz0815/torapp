@@ -32,12 +32,17 @@ class BleGattKanal(
         data class Verbindung(val status: Int, val verbunden: Boolean) : Ereignis()
         data class Dienste(val status: Int) : Ereignis()
         data class Geschrieben(val status: Int) : Ereignis()
+        data class Mtu(val mtu: Int, val status: Int) : Ereignis()
         class Gelesen(val status: Int, val wert: ByteArray) : Ereignis()
     }
 
     private val ereignisse = LinkedBlockingQueue<Ereignis>()
     private var gatt: BluetoothGatt? = null
     private val kennungen = HashMap<Kanal, BluetoothGattCharacteristic>()
+    private var mtu = 23
+
+    override val maxBlock: Int
+        get() = if (grosseBloeckeAus) Konfig.BLOCK_GROESSE else maxOf(Konfig.BLOCK_GROESSE, minOf(mtu - 3, 244))
 
     private val rueckruf = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, neuerZustand: Int) {
@@ -50,6 +55,10 @@ class BleGattKanal(
 
         override fun onCharacteristicWrite(g: BluetoothGatt, c: BluetoothGattCharacteristic, status: Int) {
             ereignisse.offer(Ereignis.Geschrieben(status))
+        }
+
+        override fun onMtuChanged(g: BluetoothGatt, neueMtu: Int, status: Int) {
+            ereignisse.offer(Ereignis.Mtu(neueMtu, status))
         }
 
         // Bis Android 12: Wert steht in der Kennung
@@ -66,14 +75,20 @@ class BleGattKanal(
         }
     }
 
-    private fun ereignisErwarten(beschreibung: String): Ereignis {
-        val ende = System.currentTimeMillis() + Konfig.ZEITLIMIT_MS
+    private fun ereignisErwarten(beschreibung: String, zeitlimitMs: Long = Konfig.ZEITLIMIT_MS): Ereignis {
+        val ende = System.currentTimeMillis() + zeitlimitMs
         while (true) {
             val rest = ende - System.currentTimeMillis()
             if (rest <= 0) throw GattFehler("Zeitüberschreitung: $beschreibung")
             val e = ereignisse.poll(rest, TimeUnit.MILLISECONDS)
                 ?: throw GattFehler("Zeitüberschreitung: $beschreibung")
+            // Verspätete MTU-Antwort: übernehmen und weiter warten
+            if (e is Ereignis.Mtu && !beschreibung.startsWith("MTU")) {
+                if (e.status == BluetoothGatt.GATT_SUCCESS) mtu = e.mtu
+                continue
+            }
             if (e is Ereignis.Verbindung && !e.verbunden) {
+                gatt = null
                 throw GattFehler("Verbindung getrennt bei $beschreibung (GATT-Status ${e.status})", e.status)
             }
             return e
@@ -97,7 +112,19 @@ class BleGattKanal(
         if (verbindung !is Ereignis.Verbindung || verbindung.status != BluetoothGatt.GATT_SUCCESS) {
             throw GattFehler("Verbindungsaufbau fehlgeschlagen ($verbindung)")
         }
-        Thread.sleep(Konfig.PAUSE_NACH_VERBINDUNG_MS)
+        g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+        if (!grosseBloeckeAus && g.requestMtu(Konfig.MTU_WUNSCH)) {
+            try {
+                val m = ereignisErwarten("MTU-Aushandlung", 1500)
+                if (m is Ereignis.Mtu && m.status == BluetoothGatt.GATT_SUCCESS) mtu = m.mtu
+            } catch (e: GattFehler) {
+                if (gatt == null) throw e
+                log.debug("MTU-Aushandlung ohne Antwort, Standard bleibt")
+            }
+        } else {
+            Thread.sleep(Konfig.PAUSE_NACH_VERBINDUNG_MS)
+        }
+        log.debug("MTU $mtu, Blockgröße $maxBlock")
 
         if (!g.discoverServices()) throw GattFehler("Dienstsuche konnte nicht gestartet werden")
         val dienste = ereignisErwarten("Dienstsuche")
@@ -115,8 +142,33 @@ class BleGattKanal(
         log.debug("GATT-Verbindung und RPC-Dienst bereit")
     }
 
-    @Suppress("DEPRECATION")
     override fun schreiben(kanal: Kanal, daten: ByteArray) {
+        var versuch = 1
+        while (true) {
+            try {
+                einmalSchreiben(kanal, daten)
+                if (versuch > 1) log.debug("Schreiben auf $kanal im $versuch. Anlauf erfolgreich")
+                return
+            } catch (e: GattFehler) {
+                // Längenangabe darf gefahrlos erneut gesendet werden (überschreibt nur den Zähler).
+                // Typisch beim ersten Schreiben, solange die Verschlüsselung noch aufgebaut wird.
+                if (kanal == Kanal.TX && gatt != null && versuch < Konfig.TX_WIEDERHOLUNGEN) {
+                    log.debug("Schreiben auf TX abgelehnt (${e.message}), neuer Anlauf in derselben Verbindung")
+                    Thread.sleep(Konfig.TX_PAUSE_MS * versuch)
+                    versuch++
+                    continue
+                }
+                if (kanal == Kanal.DATEN && daten.size > Konfig.BLOCK_GROESSE && !grosseBloeckeAus) {
+                    grosseBloeckeAus = true
+                    log.warnung("Große Datenblöcke abgelehnt, ab jetzt ${Konfig.BLOCK_GROESSE}-Byte-Blöcke")
+                }
+                throw e
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun einmalSchreiben(kanal: Kanal, daten: ByteArray) {
         val g = gatt ?: throw GattFehler("Nicht verbunden")
         val c = kennungen[kanal] ?: throw GattFehler("Kennung $kanal fehlt")
         val gestartet = if (Build.VERSION.SDK_INT >= 33) {
@@ -161,6 +213,10 @@ class BleGattKanal(
     }
 
     companion object {
+        /** Wird gesetzt, wenn der Shelly große Blöcke ablehnt (gilt bis App-Neustart). */
+        @Volatile
+        var grosseBloeckeAus = false
+
         val UUID_DIENST: UUID = UUID.fromString("5f6d4f53-5f52-5043-5f53-56435f49445f")
         val UUID_DATEN: UUID = UUID.fromString("5f6d4f53-5f52-5043-5f64-6174615f5f5f")
         val UUID_TX: UUID = UUID.fromString("5f6d4f53-5f52-5043-5f74-785f63746c5f")
