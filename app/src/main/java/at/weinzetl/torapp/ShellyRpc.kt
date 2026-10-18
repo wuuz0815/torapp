@@ -51,12 +51,13 @@ interface Zugang {
 /** Digest-Anmeldung der Shelly-RPC-Schnittstelle (SHA-256), identisch zur Web-App. */
 object ShellyDigest {
     const val BENUTZER = "admin"
-    private val NONCE = Regex("\"nonce\"\\s*:\\s*\"?(\\d+)")
+    private val NONCE = Regex("\"nonce\"\\s*:\\s*(?:\"([^\"]+)\"|(\\d+))")
     private val NC = Regex("\"nc\"\\s*:\\s*\"?(\\d+)")
     private val REALM = Regex("\"realm\"\\s*:\\s*\"([^\"]+)\"")
     private val zufall = SecureRandom()
 
-    data class Herausforderung(val realm: String, val nonce: String, val nc: String)
+    /** nonceIstText: Shelly sendet die Nonce je nach Firmware als Zahl oder als Text (Base64). */
+    data class Herausforderung(val realm: String, val nonce: String, val nc: String, val nonceIstText: Boolean = false)
 
     fun sha256(text: String): String =
         MessageDigest.getInstance("SHA-256").digest(text.toByteArray(Charsets.UTF_8))
@@ -73,16 +74,23 @@ object ShellyDigest {
             .replace("\\u0022", "\"")
             .replace("\\\\\\\"", "\"")
             .replace("\\\"", "\"")
+            .replace("\\/", "/")
         val realm = REALM.find(text)?.groupValues?.get(1) ?: return null
-        val nonce = NONCE.find(text)?.groupValues?.get(1) ?: return null
+        val treffer = NONCE.find(text) ?: return null
+        val alsText = treffer.groupValues[1]
         val nc = NC.find(text)?.groupValues?.get(1) ?: "1"
-        return Herausforderung(realm, nonce, nc)
+        return if (alsText.isNotEmpty()) {
+            Herausforderung(realm, alsText, nc, nonceIstText = true)
+        } else {
+            Herausforderung(realm, treffer.groupValues[2], nc)
+        }
     }
 
     fun authJson(h: Herausforderung, ha1: String, cnonce: Long = (zufall.nextInt() and 0x7fffffff).toLong()): String {
         val ha2 = sha256("dummy_method:dummy_uri")
         val antwort = sha256("$ha1:${h.nonce}:${h.nc}:$cnonce:auth:$ha2")
-        return """{"realm":"${h.realm}","username":"$BENUTZER","nonce":${h.nonce},"cnonce":$cnonce,"response":"$antwort","algorithm":"SHA-256"}"""
+        val nonceJson = if (h.nonceIstText) "\"${h.nonce}\"" else h.nonce
+        return """{"realm":"${h.realm}","username":"$BENUTZER","nonce":$nonceJson,"cnonce":$cnonce,"response":"$antwort","algorithm":"SHA-256"}"""
     }
 }
 

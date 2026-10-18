@@ -8,7 +8,7 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val APP_VERSION = "1.0.3"
+val APP_VERSION = "1.0.4"
 
 // versionCode aus SemVer ableiten: 1.2.3 -> 10203
 val versionsCode = APP_VERSION.split(".").map { it.toInt() }.let { (a, b, c) -> a * 10000 + b * 100 + c }
