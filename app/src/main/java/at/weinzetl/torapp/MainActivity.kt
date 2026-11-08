@@ -64,7 +64,7 @@ class MainActivity : Activity() {
         setContentView(oberflaecheBauen())
         log.beobachter = { text -> ui.post { txtLog.text = text } }
         txtLog.text = log.text()
-        log.info("Tor-App ${BuildConfig.VERSION_NAME} gestartet (Android ${Build.VERSION.RELEASE}, API ${Build.VERSION.SDK_INT})")
+        log.info("Tor-App ${BuildConfig.VERSION_NAME} gestartet (${Gemeinsam.geraeteInfo()})")
         geraetAnzeigen()
         mitBerechtigung(fuerSuche = false) {
             if (einstellungen.geraetAdresse == null) einzigenShellyUebernehmen()
@@ -147,6 +147,8 @@ class MainActivity : Activity() {
                 log.info("Diagnosemodus ${if (an) "ein" else "aus"}")
             }
         }, breit().apply { topMargin = dp(16) })
+
+        spalte.addView(knopf("Protokoll teilen") { protokollTeilen() })
 
         spalte.addView(TextView(this).apply {
             text = "Protokoll"
@@ -442,6 +444,16 @@ class MainActivity : Activity() {
             }
         }
         kopplungsEmpfaenger = null
+    }
+
+    private fun protokollTeilen() {
+        val text = "Tor-App ${BuildConfig.VERSION_NAME} – ${Gemeinsam.geraeteInfo()}\n\n${log.text()}"
+        val senden = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Tor-App Protokoll")
+            putExtra(Intent.EXTRA_TEXT, text)
+        }
+        startActivity(Intent.createChooser(senden, "Protokoll teilen"))
     }
 
     // -------------------------------------------------------------------------

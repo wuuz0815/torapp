@@ -153,19 +153,32 @@ object Gemeinsam {
         val app = kontext.applicationContext
         val adresse = Einstellungen(app).geraetAdresse ?: return null
         val log = protokoll(app)
-        return TorSteuerung(log, { BleGattKanal(app, adresse, log) }, zugang = Zugangsspeicher(app, log))
+        var versuch = 0
+        return TorSteuerung(
+            log,
+            { versuch++; BleGattKanal(app, adresse, log, vorherSuchen = versuch > 1) },
+            zugang = Zugangsspeicher(app, log),
+        )
     }
 
     /** Benötigte Laufzeit-Berechtigungen; für die Gerätesuche kommen weitere hinzu. */
     fun benoetigteBerechtigungen(fuerSuche: Boolean): Array<String> = when {
         Build.VERSION.SDK_INT >= 31 && fuerSuche ->
             arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
+        // Ab Android 12 gehören Verbinden und Suchen zur selben Freigabe „Geräte in der Nähe“
         Build.VERSION.SDK_INT >= 31 ->
-            arrayOf(Manifest.permission.BLUETOOTH_CONNECT)
+            arrayOf(Manifest.permission.BLUETOOTH_CONNECT, Manifest.permission.BLUETOOTH_SCAN)
         fuerSuche ->
             arrayOf(Manifest.permission.ACCESS_FINE_LOCATION)
         else -> emptyArray()
     }
+
+    /** Gezielte Suche vor Wiederholungen: bis Android 11 nur mit Standortfreigabe. */
+    fun sucheErlaubt(kontext: Context): Boolean = fehlendeBerechtigungen(kontext, fuerSuche = true).isEmpty()
+
+    /** Kurzbeschreibung des Handys für das Protokoll. */
+    fun geraeteInfo(): String =
+        "${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE} (API ${Build.VERSION.SDK_INT})"
 
     fun fehlendeBerechtigungen(kontext: Context, fuerSuche: Boolean): List<String> =
         benoetigteBerechtigungen(fuerSuche).filter {

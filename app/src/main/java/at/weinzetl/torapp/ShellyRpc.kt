@@ -17,7 +17,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 /** Die drei GATT-Kennungen des Shelly-RPC-Dienstes. */
 enum class Kanal { DATEN, TX, RX }
 
-class GattFehler(nachricht: String, val status: Int = -1) : Exception(nachricht)
+/** endgueltig = true: Wiederholen ist sinnlos (z. B. Handy nicht gekoppelt). */
+class GattFehler(nachricht: String, val status: Int = -1, val endgueltig: Boolean = false) : Exception(nachricht)
 
 /** Abstraktion der Bluetooth-Verbindung (Android: BleGattKanal, Tests: Simulation). */
 interface GattKanal {
@@ -295,6 +296,10 @@ class TorSteuerung(
             } catch (e: Exception) {
                 letzterFehler = e
                 log.warnung("Versuch $versuch/${Konfig.VERSUCHE} fehlgeschlagen: ${e.javaClass.simpleName} ${e.message}")
+                if (e is GattFehler && e.endgueltig) {
+                    log.fehler("Abbruch ohne weitere Versuche: ${e.message}")
+                    return Lauf.Fehler(e.message ?: "Verbindung nicht möglich")
+                }
                 if (rpc.datenBegonnen && !sicherWiederholbar) {
                     log.warnung("Befehl war bereits unterwegs, keine Wiederholung (Schutz vor Doppelimpuls)")
                     return Lauf.Fehler("Unklar, ob das Tor reagiert hat. Bitte schauen und bei Bedarf nochmal tippen.")

@@ -14,10 +14,16 @@ import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothStatusCodes
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.os.Build
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -26,6 +32,8 @@ class BleGattKanal(
     private val kontext: Context,
     private val adresse: String,
     private val log: Protokoll,
+    /** Vor dem Verbinden gezielt suchen (frischt den Bluetooth-Gerätespeicher von Android auf). */
+    private val vorherSuchen: Boolean = false,
 ) : GattKanal {
 
     private sealed class Ereignis {
@@ -37,7 +45,11 @@ class BleGattKanal(
     }
 
     private val ereignisse = LinkedBlockingQueue<Ereignis>()
+    /** Aktive Verbindung (null, sobald getrennt). */
     private var gatt: BluetoothGatt? = null
+
+    /** Muss in jedem Fall mit close() freigegeben werden, auch nach einem Abbruch. */
+    private var offen: BluetoothGatt? = null
     private val kennungen = HashMap<Kanal, BluetoothGattCharacteristic>()
     private var mtu = 23
 
@@ -89,7 +101,7 @@ class BleGattKanal(
             }
             if (e is Ereignis.Verbindung && !e.verbunden) {
                 gatt = null
-                throw GattFehler("Verbindung getrennt bei $beschreibung (GATT-Status ${e.status})", e.status)
+                throw GattFehler("Verbindung getrennt bei $beschreibung (${statusText(e.status)})", e.status)
             }
             return e
         }
@@ -102,15 +114,27 @@ class BleGattKanal(
         if (!adapter.isEnabled) throw GattFehler("Bluetooth ist ausgeschaltet")
 
         val geraet = adapter.getRemoteDevice(adresse)
+        if (geraet.bondState != BluetoothDevice.BOND_BONDED) {
+            throw GattFehler(
+                "Handy ist nicht mit dem Shelly gekoppelt. Bitte unter „Gerät wählen“ neu koppeln.",
+                endgueltig = true,
+            )
+        }
+        if (vorherSuchen) {
+            val gesehen = geraetSuchen(adapter)
+            log.debug(if (gesehen) "Shelly in Reichweite gefunden" else "Shelly bei der Suche nicht gesehen")
+        }
         ereignisse.clear()
         log.debug("Verbinde mit $adresse (Kopplung: ${kopplungText(geraet.bondState)})")
         val g = geraet.connectGatt(kontext, false, rueckruf, BluetoothDevice.TRANSPORT_LE)
             ?: throw GattFehler("Verbindung konnte nicht gestartet werden")
         gatt = g
+        offen = g
 
         val verbindung = ereignisErwarten("Verbindungsaufbau")
         if (verbindung !is Ereignis.Verbindung || verbindung.status != BluetoothGatt.GATT_SUCCESS) {
-            throw GattFehler("Verbindungsaufbau fehlgeschlagen ($verbindung)")
+            val status = (verbindung as? Ereignis.Verbindung)?.status ?: -1
+            throw GattFehler("Verbindungsaufbau fehlgeschlagen (${statusText(status)})", status)
         }
         g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
         if (!grosseBloeckeAus && g.requestMtu(Konfig.MTU_WUNSCH)) {
@@ -129,7 +153,7 @@ class BleGattKanal(
         if (!g.discoverServices()) throw GattFehler("Dienstsuche konnte nicht gestartet werden")
         val dienste = ereignisErwarten("Dienstsuche")
         if (dienste !is Ereignis.Dienste || dienste.status != BluetoothGatt.GATT_SUCCESS) {
-            throw GattFehler("Dienstsuche fehlgeschlagen ($dienste)")
+            throw GattFehler("Dienstsuche fehlgeschlagen (${statusText((dienste as? Ereignis.Dienste)?.status ?: -1)})")
         }
 
         val dienst = g.getService(UUID_DIENST)
@@ -181,7 +205,8 @@ class BleGattKanal(
         if (!gestartet) throw GattFehler("Schreiben auf $kanal konnte nicht gestartet werden")
         val e = ereignisErwarten("Schreiben $kanal")
         if (e !is Ereignis.Geschrieben || e.status != BluetoothGatt.GATT_SUCCESS) {
-            throw GattFehler("Schreiben auf $kanal fehlgeschlagen ($e)")
+            val status = (e as? Ereignis.Geschrieben)?.status ?: -1
+            throw GattFehler("Schreiben auf $kanal fehlgeschlagen (${statusText(status)})", status)
         }
     }
 
@@ -191,13 +216,16 @@ class BleGattKanal(
         if (!g.readCharacteristic(c)) throw GattFehler("Lesen von $kanal konnte nicht gestartet werden")
         val e = ereignisErwarten("Lesen $kanal")
         if (e !is Ereignis.Gelesen || e.status != BluetoothGatt.GATT_SUCCESS) {
-            throw GattFehler("Lesen von $kanal fehlgeschlagen")
+            throw GattFehler("Lesen von $kanal fehlgeschlagen (${statusText((e as? Ereignis.Gelesen)?.status ?: -1)})")
         }
         return e.wert
     }
 
     override fun trennen() {
-        val g = gatt ?: return
+        // Auch nach einem Verbindungsabbruch freigeben: Sonst bleibt bei Android ein
+        // GATT-Client belegt, und weitere Versuche scheitern zunehmend (Status 133).
+        val g = offen ?: return
+        offen = null
         gatt = null
         try {
             g.disconnect()
@@ -209,7 +237,39 @@ class BleGattKanal(
         } catch (e: Exception) {
             log.debug("close: ${e.message}")
         }
-        log.debug("Bluetooth-Verbindung getrennt")
+        log.debug("Bluetooth-Verbindung freigegeben")
+    }
+
+    /** Kurze, gezielte Suche nach der Shelly-Adresse (max. 3 s). */
+    private fun geraetSuchen(adapter: BluetoothAdapter): Boolean {
+        if (!Gemeinsam.sucheErlaubt(kontext)) {
+            log.debug("Suche nicht erlaubt (Berechtigung fehlt), verbinde direkt")
+            return false
+        }
+        val scanner = adapter.bluetoothLeScanner ?: return false
+        val gefunden = CountDownLatch(1)
+        val suche = object : ScanCallback() {
+            override fun onScanResult(typ: Int, ergebnis: ScanResult) {
+                if (ergebnis.device.address.equals(adresse, ignoreCase = true)) gefunden.countDown()
+            }
+        }
+        return try {
+            scanner.startScan(
+                listOf(ScanFilter.Builder().setDeviceAddress(adresse.uppercase()).build()),
+                ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(),
+                suche,
+            )
+            gefunden.await(3000, TimeUnit.MILLISECONDS)
+        } catch (e: Exception) {
+            log.debug("Suche nicht möglich: ${e.message}")
+            false
+        } finally {
+            try {
+                scanner.stopScan(suche)
+            } catch (e: Exception) {
+                log.debug("stopScan: ${e.message}")
+            }
+        }
     }
 
     companion object {
@@ -221,6 +281,21 @@ class BleGattKanal(
         val UUID_DATEN: UUID = UUID.fromString("5f6d4f53-5f52-5043-5f64-6174615f5f5f")
         val UUID_TX: UUID = UUID.fromString("5f6d4f53-5f52-5043-5f74-785f63746c5f")
         val UUID_RX: UUID = UUID.fromString("5f6d4f53-5f52-5043-5f72-785f63746c5f")
+
+        /** Übersetzt Android-GATT-Statuscodes in verständlichen Text. */
+        fun statusText(status: Int): String = when (status) {
+            0 -> "Status 0, erfolgreich"
+            5 -> "Status 5, Anmeldung fehlt – Kopplung prüfen"
+            8 -> "Status 8, Zeitüberschreitung der Funkverbindung"
+            14 -> "Status 14, vom Shelly abgelehnt (Verschlüsselung noch nicht bereit)"
+            15 -> "Status 15, Verschlüsselung fehlt – Kopplung prüfen"
+            19 -> "Status 19, vom Shelly getrennt"
+            22 -> "Status 22, vom Handy getrennt"
+            62 -> "Status 62, Verbindung nicht aufgebaut"
+            133 -> "Status 133, allgemeiner Android-Bluetooth-Fehler"
+            137 -> "Status 137, Kopplung abgelehnt – neu koppeln"
+            else -> "Status $status"
+        }
 
         fun kopplungText(zustand: Int): String = when (zustand) {
             BluetoothDevice.BOND_BONDED -> "gekoppelt"
